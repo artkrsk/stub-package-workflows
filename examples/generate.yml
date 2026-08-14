@@ -1,0 +1,35 @@
+# Caller template (free-source repos only): .github/workflows/generate.yml
+# Must declare source_version + secondary_version so stub-check-updates.yml
+# can dispatch it with standardized input names.
+name: Generate Stubs
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_version:
+        description: 'Source version: "latest", "X.Y.Z", or "dev"'
+        required: true
+        default: 'latest'
+        type: string
+      secondary_version:
+        description: 'Secondary source version: "latest", "X.Y.Z", or "" to skip'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  generate:
+    uses: artkrsk/stub-package-workflows/.github/workflows/stub-generate.yml@master
+    with:
+      source_version: ${{ inputs.source_version }}
+      secondary_version: ${{ inputs.secondary_version }}
+      wp_org_slug: example-plugin
+      source_env_name: EXAMPLE_PATH
+      stub_file: example-stubs.php
+      version_define_name: EXAMPLE_VERSION
+      release_title: 'Example Plugin'

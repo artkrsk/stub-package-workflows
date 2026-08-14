@@ -1,0 +1,16 @@
+# Caller template: .github/workflows/release.yml in a stub repo
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: artkrsk/stub-package-workflows/.github/workflows/stub-release.yml@master
+    with:
+      release_title: 'Example Plugin'

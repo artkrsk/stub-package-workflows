@@ -1,0 +1,129 @@
+name: Stub Check Updates
+
+# Reusable version check for stub packages with FREE, publicly fetchable
+# sources. Compares the latest upstream version against existing tags and
+# dispatches the caller's generate workflow when stubs are missing for it.
+# The caller owns the cron schedule; paid-source stub repos deliberately
+# have no version automation at all (generation is a local, manual step).
+
+on:
+  workflow_call:
+    inputs:
+      primary_slug:
+        description: 'WordPress.org plugin slug of the primary source, e.g. elementor'
+        required: true
+        type: string
+      secondary_source:
+        description: "Optional secondary source type: 'github-release' or ''"
+        required: false
+        type: string
+        default: ''
+      secondary_repo:
+        description: 'GitHub owner/repo for the secondary source, e.g. proelements/proelements'
+        required: false
+        type: string
+        default: ''
+      generate_workflow:
+        description: "Caller's generate workflow file to dispatch"
+        required: false
+        type: string
+        default: 'generate.yml'
+      runner:
+        description: 'Runner label'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  check-version:
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      - name: Disable git hooks
+        run: git config --global core.hooksPath /dev/null
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # Full history for tag comparison
+
+      - name: Get latest primary version from WordPress.org
+        id: primary
+        run: |
+          LATEST_VERSION=$(curl -s "https://api.wordpress.org/plugins/info/1.0/${{ inputs.primary_slug }}.json" | \
+            python3 -c "import sys, json; print(json.load(sys.stdin)['version'])")
+
+          if [ -z "$LATEST_VERSION" ]; then
+            echo "❌ Failed to fetch ${{ inputs.primary_slug }} version from WordPress.org API"
+            exit 1
+          fi
+
+          echo "version=$LATEST_VERSION" >> "$GITHUB_OUTPUT"
+          echo "✓ Latest ${{ inputs.primary_slug }}: $LATEST_VERSION"
+
+      - name: Get latest secondary version from GitHub
+        id: secondary
+        if: inputs.secondary_source == 'github-release'
+        run: |
+          LATEST_TAG=$(curl -s "https://api.github.com/repos/${{ inputs.secondary_repo }}/releases/latest" | \
+            python3 -c "import sys, json; print(json.load(sys.stdin)['tag_name'])")
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "❌ Failed to fetch ${{ inputs.secondary_repo }} version from GitHub API"
+            exit 1
+          fi
+
+          LATEST_VERSION="${LATEST_TAG#v}"
+          echo "version=$LATEST_VERSION" >> "$GITHUB_OUTPUT"
+          echo "✓ Latest ${{ inputs.secondary_repo }}: $LATEST_VERSION"
+
+      - name: Check if stubs exist for this version
+        id: check
+        run: |
+          PRIMARY_VERSION="${{ steps.primary.outputs.version }}"
+
+          # All tags for this upstream version (vX.Y.Z, vX.Y.Z.1, ...)
+          MATCHING_TAGS=$(git tag -l "v${PRIMARY_VERSION}*" | sort -V | tail -1)
+
+          if [ -z "$MATCHING_TAGS" ]; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "✅ No stubs found for $PRIMARY_VERSION - update needed"
+          else
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            echo "⏭️  Stubs already exist for $PRIMARY_VERSION (tag: $MATCHING_TAGS)"
+          fi
+
+      - name: Trigger stub generation
+        if: steps.check.outputs.needs_update == 'true'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const inputs = { source_version: '${{ steps.primary.outputs.version }}' };
+            const secondary = '${{ steps.secondary.outputs.version }}';
+            if (secondary) {
+              inputs.secondary_version = secondary;
+            }
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: '${{ inputs.generate_workflow }}',
+              ref: context.payload.repository.default_branch,
+              inputs,
+            });
+
+            console.log('✅ Triggered stub generation for ${{ steps.primary.outputs.version }}');
+
+      - name: Summary
+        run: |
+          echo "## Version Check Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **${{ inputs.primary_slug }}**: ${{ steps.primary.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ steps.secondary.outputs.version }}" ]; then
+            echo "- **${{ inputs.secondary_repo }}**: ${{ steps.secondary.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "- **Update Needed**: ${{ steps.check.outputs.needs_update }}" >> "$GITHUB_STEP_SUMMARY"

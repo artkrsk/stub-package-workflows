@@ -1,0 +1,63 @@
+name: Stub Test
+
+# Reusable test workflow for composer-only PHPStan stub packages:
+# syntax-check the stub file, prove the working tree is clean (catches
+# uncommitted regeneration output), then run the package's own test suite.
+
+on:
+  workflow_call:
+    inputs:
+      stub_file:
+        description: 'Stub file to lint, e.g. elementor-stubs.php'
+        required: true
+        type: string
+      php_version:
+        description: 'PHP version to run under'
+        required: false
+        type: string
+        default: '8.0'
+      test_command:
+        description: "Test command; pass '' to skip"
+        required: false
+        type: string
+        default: 'composer test'
+      runner:
+        description: 'Runner label'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      # captainhook wires git hooks during composer install; keep them out of CI
+      - name: Disable git hooks
+        run: git config --global core.hooksPath /dev/null
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ inputs.php_version }}
+          tools: composer
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Verify stub syntax
+        run: php -l "${{ inputs.stub_file }}"
+
+      - name: Verify no uncommitted changes
+        run: git diff --exit-code
+
+      - name: Run test suite
+        if: inputs.test_command != ''
+        run: ${{ inputs.test_command }}

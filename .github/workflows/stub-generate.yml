@@ -1,0 +1,292 @@
+name: Stub Generate
+
+# Reusable generation pipeline for stub packages with FREE, publicly
+# fetchable sources: download source (wp.org primary, optional GitHub
+# secondary), run the repo's own `composer generate`, refresh CHANGELOG,
+# then branch → PR → auto-merge → tag → release. Tags follow vBASE(.N):
+# regenerating without an upstream bump appends/increments the .N suffix.
+
+on:
+  workflow_call:
+    inputs:
+      source_version:
+        description: "Primary source version: 'latest', 'X.Y.Z', or 'dev' (needs primary_dev_repo)"
+        required: true
+        type: string
+      secondary_version:
+        description: "Secondary source version: 'latest', 'X.Y.Z', or '' to skip"
+        required: false
+        type: string
+        default: ''
+      wp_org_slug:
+        description: 'WordPress.org slug of the primary source, e.g. elementor'
+        required: true
+        type: string
+      primary_dev_repo:
+        description: "GitHub owner/repo used when source_version is 'dev'"
+        required: false
+        type: string
+        default: ''
+      secondary_github_repo:
+        description: 'GitHub owner/repo of the secondary source, e.g. proelements/proelements'
+        required: false
+        type: string
+        default: ''
+      secondary_latest_ref:
+        description: "Secondary ref when secondary_version is 'latest'"
+        required: false
+        type: string
+        default: 'master'
+      source_env_name:
+        description: 'Env var generate.php reads for the primary source path, e.g. ELEMENTOR_PATH'
+        required: true
+        type: string
+      secondary_env_name:
+        description: 'Env var for the secondary source path, e.g. ELEMENTOR_PRO_PATH'
+        required: false
+        type: string
+        default: ''
+      stub_file:
+        description: 'Generated stub file, e.g. elementor-stubs.php'
+        required: true
+        type: string
+      version_define_name:
+        description: 'Version constant injected into the stub file, e.g. ELEMENTOR_VERSION'
+        required: true
+        type: string
+      release_title:
+        description: 'Human name for releases, e.g. "Elementor"'
+        required: true
+        type: string
+      short_name:
+        description: 'Short name for commits/branches; defaults to release_title'
+        required: false
+        type: string
+        default: ''
+      status_check_context:
+        description: 'Commit status context reported for the generated branch'
+        required: false
+        type: string
+        default: 'test'
+      runner:
+        description: 'Runner label'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  generate:
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      - name: Disable git hooks
+        run: git config --global core.hooksPath /dev/null
+
+      - name: Checkout stub repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # Full history for tags
+
+      - name: Download primary source (stable)
+        if: inputs.source_version != 'dev'
+        run: |
+          SLUG="${{ inputs.wp_org_slug }}"
+          if [ "${{ inputs.source_version }}" = "latest" ]; then
+            URL="https://downloads.wordpress.org/plugin/${SLUG}.zip"
+            echo "Downloading latest stable from WordPress.org..."
+          else
+            URL="https://downloads.wordpress.org/plugin/${SLUG}.${{ inputs.source_version }}.zip"
+            echo "Downloading v${{ inputs.source_version }} from WordPress.org..."
+          fi
+
+          curl -L "$URL" -o source.zip
+          unzip -q source.zip -d .
+          mv "$SLUG" primary-source
+          echo "✓ Primary source downloaded"
+
+      - name: Checkout primary source (dev)
+        if: inputs.source_version == 'dev'
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.primary_dev_repo }}
+          ref: main
+          path: primary-source
+
+      - name: Checkout secondary source
+        if: inputs.secondary_version != '' && inputs.secondary_version != 'skip'
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.secondary_github_repo }}
+          ref: ${{ inputs.secondary_version == 'latest' && inputs.secondary_latest_ref || format('v{0}', inputs.secondary_version) }}
+          path: secondary-source
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Generate stubs
+        run: |
+          export ${{ inputs.source_env_name }}="./primary-source"
+          if [ -n "${{ inputs.secondary_env_name }}" ] && [ -d "./secondary-source" ]; then
+            export ${{ inputs.secondary_env_name }}="./secondary-source"
+          fi
+          composer generate
+
+      - name: Install git-cliff
+        run: |
+          if ! command -v git-cliff &> /dev/null; then
+            ARCH=$(uname -m)
+            DOWNLOAD_URL=$(curl -s https://api.github.com/repos/orhun/git-cliff/releases/latest | \
+              grep "browser_download_url.*${ARCH}.*linux-gnu.*tar.gz\"" | head -1 | cut -d '"' -f 4)
+            if [ -n "$DOWNLOAD_URL" ]; then
+              curl -sSfL "$DOWNLOAD_URL" | tar xz
+              sudo mv git-cliff-*/git-cliff /usr/local/bin/
+              rm -rf git-cliff-*/
+            else
+              pip3 install git-cliff
+            fi
+          fi
+
+      - name: Update CHANGELOG
+        run: git-cliff --config cliff.toml --verbose --output CHANGELOG.md
+
+      - name: Extract source version from stub file
+        id: version
+        run: |
+          VERSION=$(grep -oP "define\('${{ inputs.version_define_name }}', '\K[^']+" "${{ inputs.stub_file }}")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $VERSION"
+
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet "${{ inputs.stub_file }}" CHANGELOG.md; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No changes detected in stubs or CHANGELOG"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Changes detected in stubs or CHANGELOG"
+          fi
+
+      - name: Run tests
+        if: steps.changes.outputs.changed == 'true'
+        run: composer test
+
+      - name: Create branch and push
+        if: steps.changes.outputs.changed == 'true'
+        id: branch
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHORT="${{ inputs.short_name != '' && inputs.short_name || inputs.release_title }}"
+          SLUG=$(echo "$SHORT" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+          BRANCH="stubs/${SLUG}-${VERSION}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout -b "$BRANCH"
+          git add "${{ inputs.stub_file }}" CHANGELOG.md
+          git commit -m "chore(stubs): update for $SHORT $VERSION"
+          git push -u origin "$BRANCH"
+
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "✅ Pushed branch $BRANCH (SHA: $SHA)"
+
+      - name: Report status checks
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/${{ github.repository }}/statuses/${{ steps.branch.outputs.sha }} \
+            -f state=success \
+            -f context="${{ inputs.status_check_context }}" \
+            -f description="Tests passed (via generate workflow)"
+
+      - name: Create PR with auto-merge
+        if: steps.changes.outputs.changed == 'true'
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHORT="${{ steps.branch.outputs.short }}"
+
+          PR_URL=$(gh pr create \
+            --title "chore(stubs): update for $SHORT $VERSION" \
+            --body "Automated stub generation for ${{ inputs.release_title }} $VERSION" \
+            --head "${{ steps.branch.outputs.branch }}" \
+            --base "${{ github.event.repository.default_branch }}")
+
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "✅ Created PR: $PR_URL"
+
+          gh pr merge "$PR_URL" --auto --squash --delete-branch
+          echo "✅ Auto-merge enabled"
+
+      - name: Wait for PR merge and create release
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PR_URL="${{ steps.pr.outputs.pr_url }}"
+          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+
+          echo "Waiting for PR to be merged..."
+
+          for i in {1..60}; do
+            STATE=$(gh pr view "$PR_URL" --json state --jq '.state')
+            if [ "$STATE" = "MERGED" ]; then
+              echo "✅ PR merged!"
+              break
+            elif [ "$STATE" = "CLOSED" ]; then
+              echo "❌ PR was closed without merging"
+              exit 1
+            fi
+            echo "Waiting... ($i/60) - State: $STATE"
+            sleep 10
+          done
+
+          if [ "$STATE" != "MERGED" ]; then
+            echo "❌ Timeout waiting for PR to merge"
+            exit 1
+          fi
+
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout "$DEFAULT_BRANCH"
+          git pull origin "$DEFAULT_BRANCH"
+
+          BASE_TAG="v$VERSION"
+          if git rev-parse "$BASE_TAG" >/dev/null 2>&1; then
+            PATCH=1
+            while git rev-parse "${BASE_TAG}.${PATCH}" >/dev/null 2>&1; do
+              PATCH=$((PATCH + 1))
+            done
+            TAG="${BASE_TAG}.${PATCH}"
+            echo "Base tag $BASE_TAG exists, creating patch: $TAG"
+          else
+            TAG="$BASE_TAG"
+            echo "Creating tag: $TAG"
+          fi
+
+          git tag "$TAG" -m "Stubs for ${{ inputs.release_title }} $VERSION"
+          git push origin "$TAG"
+          echo "✅ Created tag: $TAG"
+
+          gh release create "$TAG" \
+            --title "${{ inputs.release_title }} $VERSION Stubs" \
+            --generate-notes \
+            --verify-tag
+          echo "✅ Created release for $TAG"
+
+      - name: No changes summary
+        if: steps.changes.outputs.changed == 'false'
+        run: |
+          echo "No changes to commit. Stubs are already up to date for ${{ inputs.release_title }} ${{ steps.version.outputs.version }}"

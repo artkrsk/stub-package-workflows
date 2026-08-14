@@ -1,0 +1,20 @@
+# Caller template (free-source repos only): .github/workflows/check-updates.yml
+name: Check for Updates
+
+on:
+  schedule:
+    - cron: '0 0 1,15 * *' # biweekly
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  check-version:
+    uses: artkrsk/stub-package-workflows/.github/workflows/stub-check-updates.yml@master
+    with:
+      primary_slug: example-plugin
+      # Optional secondary source:
+      # secondary_source: github-release
+      # secondary_repo: owner/repo
