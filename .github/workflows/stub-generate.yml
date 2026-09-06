@@ -67,7 +67,7 @@ on:
         description: 'Commit status context reported for the generated branch'
         required: false
         type: string
-        default: 'test'
+        default: 'test / test'
       runner:
         description: 'Runner label'
         required: false
