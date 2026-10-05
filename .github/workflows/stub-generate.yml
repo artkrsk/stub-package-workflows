@@ -227,7 +227,7 @@ jobs:
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
           echo "✅ Created PR: $PR_URL"
 
-          gh pr merge "$PR_URL" --auto --squash --delete-branch
+          gh pr merge "$PR_URL" --squash --delete-branch
           echo "✅ Auto-merge enabled"
 
       - name: Wait for PR merge and create release
